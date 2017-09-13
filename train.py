@@ -125,41 +125,19 @@ def main():
             raise
     criterion = CTCLoss()
 
-    with open(args.labels_path) as label_file:
-        labels = str(''.join(json.load(label_file)))
-    audio_conf = dict(sample_rate=args.sample_rate,
-                      window_size=args.window_size,
-                      window_stride=args.window_stride,
-                      window=args.window,
-                      noise_dir=args.noise_dir,
-                      noise_prob=args.noise_prob,
-                      noise_levels=(args.noise_min, args.noise_max))
-
-    train_dataset = SpectrogramDataset(audio_conf=audio_conf, manifest_filepath=args.train_manifest, labels=labels,
-                                       normalize=True, augment=args.augment)
-    test_dataset = SpectrogramDataset(audio_conf=audio_conf, manifest_filepath=args.val_manifest, labels=labels,
-                                      normalize=True, augment=False)
-    train_loader = AudioDataLoader(train_dataset, batch_size=args.batch_size,
-                                   num_workers=args.num_workers)
-    test_loader = AudioDataLoader(test_dataset, batch_size=args.batch_size,
-                                  num_workers=args.num_workers)
-
-    rnn_type = args.rnn_type.lower()
-    assert rnn_type in supported_rnns, "rnn_type should be either lstm, rnn or gru"
-    model = DeepSpeech(rnn_hidden_size=args.hidden_size,
-                       nb_layers=args.hidden_layers,
-                       labels=labels,
-                       rnn_type=supported_rnns[rnn_type],
-                       audio_conf=audio_conf,
-                       bidirectional=True)
-    parameters = model.parameters()
-    optimizer = torch.optim.SGD(parameters, lr=args.lr,
-                                momentum=args.momentum, nesterov=True)
-    decoder = GreedyDecoder(labels)
-
     if args.continue_from:
         print("Loading checkpoint model %s" % args.continue_from)
         package = torch.load(args.continue_from)
+        labels = package['labels']
+        audio_conf = package['audio_conf']
+        model = DeepSpeech(rnn_hidden_size=package['hidden_size'],
+                           nb_layers=package['hidden_layers'],
+                           labels=labels,
+                           rnn_type=supported_rnns[package['rnn_type']],
+                           audio_conf=audio_conf)
+        parameters = model.parameters()
+        optimizer = torch.optim.SGD(parameters, lr=args.lr,
+                                    momentum=args.momentum, nesterov=True)
         model.load_state_dict(package['state_dict'])
         optimizer.load_state_dict(package['optim_dict'])
         start_epoch = int(package.get('epoch', 1)) - 1  # Python index start at 0 for training
@@ -192,17 +170,50 @@ def main():
                 }
                 for tag, val in info.items():
                     logger.scalar_summary(tag, val, i + 1)
-        if not args.no_bucketing and epoch != 0:
-            print("Using bucketing sampler for the following epochs")
-            train_dataset = SpectrogramDatasetWithLength(audio_conf=audio_conf, manifest_filepath=args.train_manifest,
-                                                         labels=labels,
-                                                         normalize=True, augment=args.augment)
-            sampler = BucketingSampler(train_dataset)
-            train_loader.sampler = sampler
     else:
+        with open(args.labels_path) as label_file:
+            labels = str(''.join(json.load(label_file)))
+
+        audio_conf = dict(sample_rate=args.sample_rate,
+                          window_size=args.window_size,
+                          window_stride=args.window_stride,
+                          window=args.window,
+                          noise_dir=args.noise_dir,
+                          noise_prob=args.noise_prob,
+                          noise_levels=(args.noise_min, args.noise_max))
+
+        rnn_type = args.rnn_type.lower()
+        assert rnn_type in supported_rnns, "rnn_type should be either lstm, rnn or gru"
+        model = DeepSpeech(rnn_hidden_size=args.hidden_size,
+                           nb_layers=args.hidden_layers,
+                           labels=labels,
+                           rnn_type=supported_rnns[rnn_type],
+                           audio_conf=audio_conf)
+        parameters = model.parameters()
+        optimizer = torch.optim.SGD(parameters, lr=args.lr,
+                                    momentum=args.momentum, nesterov=True)
         avg_loss = 0
         start_epoch = 0
         start_iter = 0
+
+    decoder = GreedyDecoder(labels)
+    train_dataset = SpectrogramDataset(audio_conf=audio_conf, manifest_filepath=args.train_manifest, labels=labels,
+                                       normalize=True, augment=args.augment)
+    test_dataset = SpectrogramDataset(audio_conf=audio_conf, manifest_filepath=args.val_manifest, labels=labels,
+                                      normalize=True, augment=False)
+    train_loader = AudioDataLoader(train_dataset, batch_size=args.batch_size,
+                                   num_workers=args.num_workers)
+    test_loader = AudioDataLoader(test_dataset, batch_size=args.batch_size,
+                                  num_workers=args.num_workers)
+
+    if not args.no_bucketing and start_epoch != 0:  # If checkpoint, then we should check to enable bucket sampling
+        print("Using bucketing sampler for the following epochs")
+        train_dataset = SpectrogramDatasetWithLength(audio_conf=audio_conf, manifest_filepath=args.train_manifest,
+                                                     labels=labels,
+                                                     normalize=True, augment=args.augment)
+        sampler = BucketingSampler(train_dataset)
+        train_loader.sampler = sampler
+
     if args.cuda:
         model = torch.nn.DataParallel(model).cuda()
 
